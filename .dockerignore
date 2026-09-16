@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+.kilo
+.vs
+.idea
+**/bin
+**/obj
+**/TestResults
+tests
+README.md
+AI_USAGE.md
