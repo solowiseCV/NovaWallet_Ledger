@@ -185,9 +185,15 @@ convention that expects an envelope, it's a small, mechanical change from here.
 
 ## Testing — one project per layer
 
-```bash
-dotnet test
+Run the complete solution test suite from the repository root:
+
+```powershell
+dotnet test .\NovaWallet.sln --no-restore
 ```
+
+The suite requires Docker to be running because the infrastructure tests start a
+disposable PostgreSQL container. The current suite contains 52 tests and should
+finish with 52 passed, 0 failed, and 0 skipped.
 
 - **`NovaWallet.Domain.Tests`** — pure unit tests for `Wallet`, `IdempotencyRecord`,
   `DailyTransferLimitPolicy`, `WatClock`. No mocks, no database, no async waiting;

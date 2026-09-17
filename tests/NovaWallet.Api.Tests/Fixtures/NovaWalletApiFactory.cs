@@ -1,12 +1,16 @@
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Microsoft.IdentityModel.Tokens;
 using NovaWallet.Api.Tests.Fakes;
 using NovaWallet.Application.Interfaces;
 using NovaWallet.Infrastructure;
+using System.Text;
 
 namespace NovaWallet.Api.Tests.Fixtures;
 
@@ -40,6 +44,24 @@ public class NovaWalletApiFactory : WebApplicationFactory<Program>
 
         builder.ConfigureServices(services =>
         {
+            services.PostConfigure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, options =>
+            {
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidIssuer = "novawallet-mock-issuer",
+                    ValidateAudience = true,
+                    ValidAudience = "novawallet-api",
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = new SymmetricSecurityKey(
+                        Encoding.UTF8.GetBytes("test-only-signing-key-at-least-32-characters!!")),
+                    ValidateLifetime = true,
+                    ClockSkew = TimeSpan.FromSeconds(30)
+                };
+            });
+
+            services.PostConfigure<HealthCheckServiceOptions>(options => options.Registrations.Clear());
+
             services.RemoveAll<DbContextOptions<NovaWalletDbContext>>();
             services.AddDbContext<NovaWalletDbContext>(opt => opt.UseInMemoryDatabase("novawallet-api-tests"));
 

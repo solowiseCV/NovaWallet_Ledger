@@ -39,7 +39,7 @@ public class WatClockTests
         var boundsAfter = WatClock.GetDayBoundsUtc(justAfterMidnightWat);
 
         boundsBefore.StartUtc.Should().NotBe(boundsAfter.StartUtc);
-        justBeforeMidnightWat.Should().BeLessThan(boundsBefore.EndUtc);
-        justAfterMidnightWat.Should().BeGreaterThanOrEqualTo(boundsAfter.StartUtc);
+        (justBeforeMidnightWat < boundsBefore.EndUtc).Should().BeTrue();
+        (justAfterMidnightWat >= boundsAfter.StartUtc).Should().BeTrue();
     }
 }
