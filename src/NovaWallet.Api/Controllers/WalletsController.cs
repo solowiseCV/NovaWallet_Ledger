@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using NovaWallet.Application.Dtos;
 using NovaWallet.Application.Interfaces;
+using Swashbuckle.AspNetCore.Annotations;
 
 namespace NovaWallet.Api.Controllers;
 
@@ -12,6 +13,7 @@ namespace NovaWallet.Api.Controllers;
 [Authorize]
 [Produces("application/json")]
 [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
+[SwaggerTag("Create and manage wallets, credits, transfers, and transaction statements.")]
 public class WalletsController : ControllerBase
 {
     private readonly IWalletService _walletService;
@@ -21,8 +23,8 @@ public class WalletsController : ControllerBase
     private string ActorId =>
         User.FindFirstValue("customerId") ?? User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "unknown";
 
-    /// <summary>Create a wallet for a customer. Starting balance is always zero.</summary>
     [HttpPost(Name = "CreateWallet")]
+    [SwaggerOperation(Summary = "Create a wallet", Description = "Creates a wallet for a customer with a starting balance of zero.")]
     [Consumes("application/json")]
     [ProducesResponseType(typeof(WalletResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
@@ -32,15 +34,15 @@ public class WalletsController : ControllerBase
         return CreatedAtRoute("GetWallet", new { walletId = wallet.WalletId }, wallet);
     }
 
-    /// <summary>Get current balance (in kobo) and currency for a wallet.</summary>
     [HttpGet("{walletId:guid}", Name = "GetWallet")]
+    [SwaggerOperation(Summary = "Get wallet balance", Description = "Returns the current balance in kobo and the wallet currency.")]
     [ProducesResponseType(typeof(WalletResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<ActionResult<WalletResponse>> Get(Guid walletId, CancellationToken ct)
         => Ok(await _walletService.GetWalletAsync(walletId, ct));
 
-    /// <summary>Simulates an inbound NIP transfer landing in the wallet.</summary>
     [HttpPost("{walletId:guid}/credit", Name = "CreditWallet")]
+    [SwaggerOperation(Summary = "Credit a wallet", Description = "Simulates an inbound NIP transfer and increases the wallet balance.")]
     [Consumes("application/json")]
     [ProducesResponseType(typeof(WalletResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
@@ -48,12 +50,8 @@ public class WalletsController : ControllerBase
     public async Task<ActionResult<WalletResponse>> Credit(Guid walletId, [FromBody] CreditWalletRequest request, CancellationToken ct)
         => Ok(await _walletService.CreditWalletAsync(walletId, request.AmountKobo, request.Description, ActorId, ct));
 
-    /// <summary>
-    /// Atomically move funds between two wallets. Requires an Idempotency-Key
-    /// header; replaying the same key with the same payload returns the original
-    /// result, replaying with a different payload is rejected with 409.
-    /// </summary>
     [HttpPost("transfer", Name = "TransferFunds")]
+    [SwaggerOperation(Summary = "Transfer funds", Description = "Atomically moves funds between wallets. Requires an Idempotency-Key header; reusing it with a different payload returns 409.")]
     [Consumes("application/json")]
     [EnableRateLimiting("transfer")]
     [ProducesResponseType(typeof(TransferResponse), StatusCodes.Status200OK)]
@@ -75,8 +73,8 @@ public class WalletsController : ControllerBase
         return Ok(result);
     }
 
-    /// <summary>Paginated transaction history for a wallet, newest first.</summary>
     [HttpGet("{walletId:guid}/statement", Name = "GetWalletStatement")]
+    [SwaggerOperation(Summary = "Get wallet statement", Description = "Returns the wallet transaction history in reverse chronological order with pagination.")]
     [ProducesResponseType(typeof(PagedResult<TransactionResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<ActionResult<PagedResult<TransactionResponse>>> Statement(

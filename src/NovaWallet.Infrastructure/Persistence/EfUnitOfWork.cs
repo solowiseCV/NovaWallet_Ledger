@@ -1,4 +1,5 @@
 using System.Data;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using NovaWallet.Application.Interfaces;
 

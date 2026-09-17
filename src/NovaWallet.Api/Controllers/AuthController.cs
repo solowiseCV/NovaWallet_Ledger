@@ -4,20 +4,14 @@ using System.Text;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
+using Swashbuckle.AspNetCore.Annotations;
 
 namespace NovaWallet.Api.Controllers;
 
-/// <summary>
-/// DEV-ONLY mock identity provider. Mints a JWT for whatever customerId is
-/// supplied, with no credential verification at all. This exists purely so
-/// the panel can exercise the real JWT-bearer middleware and claims handling
-/// on the wallet endpoints without us having to stand up a full auth server.
-/// A real deployment would delete this controller and point ValidIssuer /
-/// signing keys at FirstBank's actual identity provider.
-/// </summary>
 [ApiController]
 [Route("api/auth")]
 [Produces("application/json")]
+[SwaggerTag("Development-only JWT token issuing for local API testing.")]
 public class AuthController : ControllerBase
 {
     private readonly IConfiguration _config;
@@ -27,8 +21,8 @@ public class AuthController : ControllerBase
     public record TokenRequest(string CustomerId);
     public record TokenResponse(string AccessToken, DateTimeOffset ExpiresAtUtc);
 
-    /// <summary>Mints a dev-only JWT for the given customerId. No credential check.</summary>
     [HttpPost("token", Name = "IssueDevToken")]
+    [SwaggerOperation(Summary = "Issue a development token", Description = "Mints a JWT for the supplied customer ID. This mock endpoint performs no credential verification.")]
     [AllowAnonymous]
     [Consumes("application/json")]
     [ProducesResponseType(typeof(TokenResponse), StatusCodes.Status200OK)]

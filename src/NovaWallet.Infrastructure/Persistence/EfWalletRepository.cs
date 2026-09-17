@@ -29,13 +29,13 @@ public class EfWalletRepository : IWalletRepository
         _db.Wallets.AnyAsync(w => w.Id == walletId, ct);
 
     public Task LockAsync(Guid walletId, CancellationToken ct) =>
-        _db.Database.ExecuteSqlInterpolatedAsync($"SELECT id FROM wallets WHERE id = {walletId} FOR UPDATE", ct);
+        _db.Database.ExecuteSqlInterpolatedAsync($"SELECT \"Id\" FROM wallets WHERE \"Id\" = {walletId} FOR UPDATE", ct);
 
     public Task LockOrderedAsync(Guid walletId1, Guid walletId2, CancellationToken ct)
     {
         var ordered = new[] { walletId1, walletId2 }.OrderBy(g => g).ToArray();
         return _db.Database.ExecuteSqlInterpolatedAsync(
-            $"SELECT id FROM wallets WHERE id = ANY({ordered}) ORDER BY id FOR UPDATE", ct);
+            $"SELECT \"Id\" FROM wallets WHERE \"Id\" = ANY({ordered}) ORDER BY \"Id\" FOR UPDATE", ct);
     }
 
     public async Task<long> GetOutboundTotalTodayAsync(Guid walletId, DateTimeOffset dayStartUtc, DateTimeOffset dayEndUtc, CancellationToken ct)
