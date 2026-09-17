@@ -44,7 +44,9 @@ public sealed class DomainExceptionHandler : IExceptionHandler
                 Status = status,
                 Title = title,
                 Type = type,
-                Detail = exception.Message,
+                Detail = status >= 500
+                    ? "An unexpected error occurred. Use the traceId when contacting support."
+                    : exception.Message,
                 Instance = httpContext.Request.Path
             }
         });

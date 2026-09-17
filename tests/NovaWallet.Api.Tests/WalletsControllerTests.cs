@@ -46,6 +46,25 @@ public class WalletsControllerTests
     }
 
     [Fact]
+    public async Task GetWallet_WhenUnexpectedErrorOccurs_DoesNotExposeInternalDetails()
+    {
+        await using var factory = new NovaWalletApiFactory();
+        var walletId = Guid.NewGuid();
+        const string internalMessage = "42703: column \\\"id\\\" does not exist";
+        factory.WalletServiceStub.OnGetWallet = (_, _) =>
+            Task.FromException<WalletResponse>(new InvalidOperationException(internalMessage));
+
+        var client = await factory.CreateClient().AuthenticatedAsAsync("cust-001");
+        var response = await client.GetAsync($"/api/wallets/{walletId}");
+
+        response.StatusCode.Should().Be(HttpStatusCode.InternalServerError);
+        var problem = await response.Content.ReadFromJsonAsync<ProblemDetails>();
+        problem!.Detail.Should().Be("An unexpected error occurred. Use the traceId when contacting support.");
+        problem.Detail.Should().NotContain(internalMessage);
+        problem.Extensions.Should().ContainKey("traceId");
+    }
+
+    [Fact]
     public async Task GetWallet_WhenFound_ReturnsWalletResponse()
     {
         await using var factory = new NovaWalletApiFactory();
