@@ -1,17 +1,17 @@
 using FluentAssertions;
 using NovaWallet.Application.Dtos;
 using NovaWallet.Domain.Exceptions;
-using NovaWallet.Infrastructure.Services;
 using NovaWallet.Infrastructure.Tests.Fixtures;
 using Xunit;
 
 namespace NovaWallet.Infrastructure.Tests;
 
 /// <summary>
-/// The test the panel specifically asked for: fires many concurrent transfer
-/// requests against the SAME source wallet and asserts the balance never goes
-/// negative and exactly as many transfers succeed as the starting balance allows
-/// (no double-spend, no lost update).
+/// The test the brief specifically asked for: fires many concurrent transfer
+/// requests against the SAME source wallet (each with its own DbContext/
+/// repository/unit-of-work, simulating separate concurrent HTTP requests) and
+/// asserts the balance never goes negative and exactly as many transfers
+/// succeed as the starting balance allows — no double-spend, no lost update.
 /// </summary>
 [Collection("Postgres collection")]
 public class ConcurrencyTests
@@ -23,8 +23,7 @@ public class ConcurrencyTests
     [Fact]
     public async Task ConcurrentTransfers_NeverAllowNegativeBalance_OrDoubleSpend()
     {
-        var setupDb = TestDbContextFactory.Create(_fixture.ConnectionString);
-        var setupSvc = new WalletService(setupDb, new SystemDateTimeProvider());
+        var (setupSvc, _) = WalletServiceFactory.Create(_fixture.ConnectionString);
 
         var source = await setupSvc.CreateWalletAsync($"conc-src-{Guid.NewGuid()}", default);
         var sink = await setupSvc.CreateWalletAsync($"conc-sink-{Guid.NewGuid()}", default);
@@ -37,8 +36,7 @@ public class ConcurrencyTests
 
         var tasks = Enumerable.Range(0, attempts).Select(async _ =>
         {
-            await using var db = TestDbContextFactory.Create(_fixture.ConnectionString);
-            var svc = new WalletService(db, new SystemDateTimeProvider());
+            var (svc, _) = WalletServiceFactory.Create(_fixture.ConnectionString);
             try
             {
                 await svc.TransferAsync(

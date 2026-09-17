@@ -4,7 +4,6 @@ using System.Text;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
-using NovaWallet.Api.Contracts;
 
 namespace NovaWallet.Api.Controllers;
 
@@ -18,7 +17,7 @@ namespace NovaWallet.Api.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/auth")]
-[Produces("application/json", "application/problem+json")]
+[Produces("application/json")]
 public class AuthController : ControllerBase
 {
     private readonly IConfiguration _config;
@@ -28,14 +27,16 @@ public class AuthController : ControllerBase
     public record TokenRequest(string CustomerId);
     public record TokenResponse(string AccessToken, DateTimeOffset ExpiresAtUtc);
 
-    [HttpPost("token")]
+    /// <summary>Mints a dev-only JWT for the given customerId. No credential check.</summary>
+    [HttpPost("token", Name = "IssueDevToken")]
     [AllowAnonymous]
-    [ProducesResponseType(typeof(ApiResponse<TokenResponse>), StatusCodes.Status200OK)]
+    [Consumes("application/json")]
+    [ProducesResponseType(typeof(TokenResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
-    public ActionResult<ApiResponse<TokenResponse>> IssueToken([FromBody] TokenRequest request)
+    public ActionResult<TokenResponse> IssueToken([FromBody] TokenRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.CustomerId))
-            return Problem(title: "Invalid request", detail: "customerId is required.", statusCode: StatusCodes.Status400BadRequest);
+            return Problem(title: "customerId is required.", statusCode: StatusCodes.Status400BadRequest);
 
         var jwtSection = _config.GetSection("Jwt");
         var signingKey = jwtSection["SigningKey"]!;
@@ -59,6 +60,6 @@ public class AuthController : ControllerBase
             expires: expires,
             signingCredentials: credentials);
 
-        return Ok(this.ToApiResponse(new TokenResponse(new JwtSecurityTokenHandler().WriteToken(token), expires)));
+        return Ok(new TokenResponse(new JwtSecurityTokenHandler().WriteToken(token), expires));
     }
 }

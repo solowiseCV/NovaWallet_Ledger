@@ -1,48 +1,28 @@
 using FluentAssertions;
 using NovaWallet.Application.Dtos;
 using NovaWallet.Domain.Exceptions;
-using NovaWallet.Infrastructure.Services;
 using NovaWallet.Infrastructure.Tests.Fixtures;
 using Xunit;
 
 namespace NovaWallet.Infrastructure.Tests;
 
+/// <summary>
+/// Confirms the real DI-wired stack (EfWalletRepository + EfUnitOfWork + a real
+/// Postgres transaction) produces the same outcomes Application.Tests already
+/// proved against the fake — i.e. that the Infrastructure implementation
+/// actually satisfies the IWalletRepository/IUnitOfWork contracts.
+/// </summary>
 [Collection("Postgres collection")]
-public class WalletServiceTests
+public class TransferOrchestrationTests
 {
     private readonly PostgresContainerFixture _fixture;
 
-    public WalletServiceTests(PostgresContainerFixture fixture) => _fixture = fixture;
-
-    private WalletService CreateService() =>
-        new(TestDbContextFactory.Create(_fixture.ConnectionString), new SystemDateTimeProvider());
-
-    [Fact]
-    public async Task CreateWallet_StartsAtZeroBalance()
-    {
-        var svc = CreateService();
-
-        var wallet = await svc.CreateWalletAsync($"cust-{Guid.NewGuid()}", default);
-
-        wallet.BalanceKobo.Should().Be(0);
-        wallet.Currency.Should().Be("NGN");
-    }
-
-    [Fact]
-    public async Task CreditWallet_IncreasesBalance()
-    {
-        var svc = CreateService();
-        var wallet = await svc.CreateWalletAsync($"cust-{Guid.NewGuid()}", default);
-
-        var updated = await svc.CreditWalletAsync(wallet.WalletId, 10_000, "test credit", wallet.CustomerId, default);
-
-        updated.BalanceKobo.Should().Be(10_000);
-    }
+    public TransferOrchestrationTests(PostgresContainerFixture fixture) => _fixture = fixture;
 
     [Fact]
     public async Task Transfer_MovesFundsBetweenWallets()
     {
-        var svc = CreateService();
+        var (svc, _) = WalletServiceFactory.Create(_fixture.ConnectionString);
         var a = await svc.CreateWalletAsync($"cust-a-{Guid.NewGuid()}", default);
         var b = await svc.CreateWalletAsync($"cust-b-{Guid.NewGuid()}", default);
         await svc.CreditWalletAsync(a.WalletId, 50_000, null, a.CustomerId, default);
@@ -58,7 +38,7 @@ public class WalletServiceTests
     [Fact]
     public async Task Transfer_InsufficientFunds_Throws()
     {
-        var svc = CreateService();
+        var (svc, _) = WalletServiceFactory.Create(_fixture.ConnectionString);
         var a = await svc.CreateWalletAsync($"cust-c-{Guid.NewGuid()}", default);
         var b = await svc.CreateWalletAsync($"cust-d-{Guid.NewGuid()}", default);
 
@@ -72,7 +52,7 @@ public class WalletServiceTests
     [Fact]
     public async Task Transfer_ExceedingDailyLimit_Throws()
     {
-        var svc = CreateService();
+        var (svc, _) = WalletServiceFactory.Create(_fixture.ConnectionString);
         var a = await svc.CreateWalletAsync($"cust-e-{Guid.NewGuid()}", default);
         var b = await svc.CreateWalletAsync($"cust-f-{Guid.NewGuid()}", default);
         await svc.CreditWalletAsync(a.WalletId, 1_000_000_000, null, a.CustomerId, default);
@@ -87,7 +67,7 @@ public class WalletServiceTests
     [Fact]
     public async Task Transfer_ByNonOwner_IsForbidden()
     {
-        var svc = CreateService();
+        var (svc, _) = WalletServiceFactory.Create(_fixture.ConnectionString);
         var a = await svc.CreateWalletAsync($"cust-g-{Guid.NewGuid()}", default);
         var b = await svc.CreateWalletAsync($"cust-h-{Guid.NewGuid()}", default);
         await svc.CreditWalletAsync(a.WalletId, 50_000, null, a.CustomerId, default);
@@ -97,5 +77,19 @@ public class WalletServiceTests
             Guid.NewGuid().ToString(), "someone-else", default);
 
         await act.Should().ThrowAsync<ForbiddenOperationException>();
+    }
+
+    [Fact]
+    public async Task Statement_ReturnsPagedTransactions_NewestFirst()
+    {
+        var (svc, _) = WalletServiceFactory.Create(_fixture.ConnectionString);
+        var a = await svc.CreateWalletAsync($"cust-m-{Guid.NewGuid()}", default);
+        await svc.CreditWalletAsync(a.WalletId, 10_000, "first", a.CustomerId, default);
+        await svc.CreditWalletAsync(a.WalletId, 20_000, "second", a.CustomerId, default);
+
+        var page = await svc.GetStatementAsync(a.WalletId, page: 1, pageSize: 20, default);
+
+        page.TotalCount.Should().Be(2);
+        page.Items.First().Description.Should().Be("second"); // newest first
     }
 }

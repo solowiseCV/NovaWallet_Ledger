@@ -5,9 +5,12 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
+using NovaWallet.Api.ExceptionHandling;
 using NovaWallet.Api.Middleware;
 using NovaWallet.Application.Interfaces;
+using NovaWallet.Application.Services;
 using NovaWallet.Infrastructure;
+using NovaWallet.Infrastructure.Persistence;
 using NovaWallet.Infrastructure.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -22,6 +25,9 @@ var connectionString = builder.Configuration.GetConnectionString("Default")
 builder.Services.AddDbContext<NovaWalletDbContext>(opt =>
     opt.UseNpgsql(connectionString)
        .AddInterceptors(new AppendOnlyAuditInterceptor()));
+
+builder.Services.AddScoped<IWalletRepository, EfWalletRepository>();
+builder.Services.AddScoped<IUnitOfWork, EfUnitOfWork>();
 
 // --- Application services ---
 builder.Services.AddScoped<IWalletService, WalletService>();
@@ -75,7 +81,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     });
 builder.Services.AddAuthorization();
 
-// --- Rate limiting (stretch goal): protect the transfer endpoint from abuse ---
+// --- Rate limiting: protect the transfer endpoint from abuse ---
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -92,9 +98,22 @@ builder.Services.AddRateLimiter(options =>
             }));
 });
 
-// --- Health checks (stretch goal): container-orchestration friendly ---
+// --- Health checks: container-orchestration friendly ---
 builder.Services.AddHealthChecks()
     .AddNpgSql(connectionString, name: "postgres");
+
+// --- RFC 7807 Problem Details, the .NET 8 built-in way ---
+// AddProblemDetails() makes [ApiController]'s automatic 400s (invalid model
+// state) RFC 7807-shaped too, not just our own thrown exceptions, and lets us
+// attach the trace id to every problem response from one place.
+builder.Services.AddProblemDetails(options =>
+{
+    options.CustomizeProblemDetails = context =>
+    {
+        context.ProblemDetails.Extensions["traceId"] = context.HttpContext.TraceIdentifier;
+    };
+});
+builder.Services.AddExceptionHandler<DomainExceptionHandler>();
 
 var app = builder.Build();
 
@@ -107,7 +126,7 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.UseMiddleware<CorrelationIdMiddleware>();
-app.UseMiddleware<ExceptionHandlingMiddleware>();
+app.UseExceptionHandler();
 
 app.UseSwagger();
 app.UseSwaggerUI();

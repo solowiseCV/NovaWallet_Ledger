@@ -30,7 +30,7 @@ public class NovaWalletDbContext : DbContext
             e.HasKey(x => x.Id);
             e.HasIndex(x => new { x.WalletId, x.CreatedAtUtc });
             e.Property(x => x.Type).HasConversion<string>().HasMaxLength(20);
-            e.HasOne<Wallet>().WithMany(w => w.Transactions).HasForeignKey(x => x.WalletId);
+            e.HasOne<Wallet>().WithMany().HasForeignKey(x => x.WalletId);
         });
 
         modelBuilder.Entity<AuditLogEntry>(e =>

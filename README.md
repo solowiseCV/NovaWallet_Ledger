@@ -5,16 +5,10 @@ A simplified wallet ledger for FirstBank NovaPay's NovaWallet module, built in C
 ## Running it
 
 ```bash
-# macOS/Linux
-cp .env.example .env
-# PowerShell
-Copy-Item .env.example .env
-# Edit .env and replace every placeholder before continuing.
 docker compose up --build
 ```
 
-The local `.env` file supplies the database credentials and JWT signing key and is ignored
-by Git. The compose stack starts Postgres, waits for it to be healthy, then builds and
+That's the whole setup: it starts Postgres, waits for it to be healthy, then builds and
 starts the API. On first boot the API creates its own schema (see "EnsureCreated vs
 migrations" below) so there's nothing else to run.
 
@@ -61,144 +55,186 @@ curl http://localhost:8080/api/wallets/<walletId>/statement?page=1&pageSize=20 \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-## Running the tests
-
-```bash
-dotnet test
-```
-
-The concurrency and idempotency tests use [Testcontainers](https://dotnet.testcontainers.org/)
-to spin up a real disposable PostgreSQL container per test run — Docker must be running
-locally, but nothing else needs to be set up. This is deliberate: the service's
-concurrency safety depends on Postgres row-level locking (`SELECT ... FOR UPDATE`),
-which an in-memory or SQLite provider does not faithfully emulate. Testing against
-anything else would give false confidence. See `AI_USAGE.md` for how this was caught.
-
 ## Architecture
 
 Four projects, dependencies flowing one way:
 
 ```
-NovaWallet.Domain          entities, enums, exceptions — no dependencies
-NovaWallet.Application     DTOs + service interfaces — depends on Domain
-NovaWallet.Infrastructure  EF Core DbContext + WalletService — depends on Domain, Application
-NovaWallet.Api             controllers, auth, middleware — depends on Infrastructure, Application
+NovaWallet.Domain          entities with behavior, exceptions, pure policies — no dependencies
+NovaWallet.Application     use-case orchestration (WalletService) + repository/UoW interfaces — depends on Domain
+NovaWallet.Infrastructure  EF Core implementations of those interfaces — depends on Domain, Application
+NovaWallet.Api             controllers, auth, Problem Details — depends on Infrastructure, Application
 ```
 
-`Wallet` and `WalletTransferPolicy` in Domain own the invariant rules: valid amounts,
-wallet ownership, sufficient funds, distinct transfer parties, and the daily limit.
-`WalletService` in Infrastructure orchestrates persistence-specific concerns such as
-Postgres row locks, transactions, idempotency storage, and statement queries. There's no repository
-abstraction over EF Core in a project this size — `DbContext` already *is* the
-unit-of-work/repository pattern combined, and adding another layer over it would just be
-indirection with no present benefit. If a second datastore or read-model were ever needed,
-that's when I'd introduce one.
+### Domain rules live in Domain, not in a service class
 
-### Data model
+`Wallet` is not an anemic property bag — `BalanceKobo` has a private setter, and the
+*only* ways to change it are `Credit(amount)` and `Debit(amount)`. `Debit` is the one
+method in the entire codebase that can reduce a balance, and it refuses to let it go
+negative. This means the "never negative" invariant can't be bypassed by a service
+class forgetting to check first — there's no other way to touch the field at all.
 
-- **wallets** — id, customer_id, balance_kobo (bigint), currency, created_at
-- **ledger_transactions** — the queryable statement: one row per posted movement
-  (Credit / TransferOut / TransferIn), with `balance_after_kobo` snapshotted at post time
-- **audit_logs** — a *separate*, append-only table recording every mutation
-  (before/after balance, actor, metadata). The `AppendOnlyAuditInterceptor` throws if
-  application code ever tries to UPDATE or DELETE an audit row via EF Core, as
-  defence-in-depth on top of the "we just never call Update/Remove on it" discipline.
-  In a real deployment I'd also `REVOKE UPDATE, DELETE` at the DB grant level for the
-  app's role.
-- **idempotency_records** — keyed by the `Idempotency-Key` header value; see below.
+The same pattern applies elsewhere:
+- `Wallet.EnsureOwnedBy(customerId)` — the ownership check for transfers.
+- `DailyTransferLimitPolicy.EnsureWithinLimit(alreadySentToday, amount)` — a pure
+  static function; it doesn't query anything itself, so it's trivially unit-testable
+  with no database.
+- `WatClock.GetDayBoundsUtc(nowUtc)` — pure WAT (UTC+1, no DST) day-boundary math.
+- `IdempotencyRecord.Resolve(requestHash)` — decides Replay/Conflict/InProgress from
+  data already on the record, with no I/O and no knowledge of Application's DTOs.
+
+`WalletService` (in Application) is left with exactly one job: orchestrate the
+*shape* of each workflow — begin transaction, lock, load, ask the domain objects to
+do their thing, persist, commit. It doesn't contain a single business rule itself.
+
+### A small repository / unit-of-work boundary — and why
+
+`IWalletRepository` and `IUnitOfWork` (defined in Application, implemented in
+Infrastructure as `EfWalletRepository` / `EfUnitOfWork`) are the seam between them.
+This is a deliberately narrow abstraction — one repository, one unit of work, not a
+generic-repository-per-entity ceremony — added for two concrete reasons rather than
+as a default habit:
+
+1. **It's what makes the Domain encapsulation above possible.** If `WalletService`
+   held a `NovaWalletDbContext` directly, Application would have to reference EF Core
+   and Postgres-specific types, which defeats the point of pulling business rules out
+   into a Domain project that's supposed to have zero infrastructure dependencies.
+2. **It's what makes Application independently testable** (see below) — orchestration
+   logic can be verified against an in-memory fake with no database at all, while the
+   locking behaviour it depends on is proven separately against real Postgres.
+
+The interface is intentionally small: `LockAsync` / `LockOrderedAsync` hide that
+locking means `SELECT ... FOR UPDATE` at all; `TryAddIdempotencyRecordAsync` returns
+`bool` rather than letting a `DbUpdateException` from a unique-constraint violation
+leak into Application code that shouldn't need to know constraints exist.
 
 ### Concurrency safety
 
-Every balance mutation runs in one DB transaction. Before reading a wallet's balance,
-the transaction takes a row lock with `SELECT ... FOR UPDATE`. Concurrent requests
-against the *same* wallet therefore queue at the database, not in application memory —
-this is correct even across multiple instances of the API, which an in-process `lock`
-would not be.
+Every balance mutation runs in one DB transaction (`IUnitOfWork`). Before reading a
+wallet's balance, the transaction takes a row lock with `SELECT ... FOR UPDATE`.
+Concurrent requests against the *same* wallet therefore queue at the database, not in
+application memory — this is correct even across multiple instances of the API, which
+an in-process lock would not be.
 
 Transfers touch two wallets, so both rows are locked **in a fixed, ascending order**
-(`ORDER BY id`) before either is read. This prevents the classic deadlock where
-Transfer A (wallet 1 → wallet 2) and Transfer B (wallet 2 → wallet 1) each hold one
-lock and wait on the other.
+(`LockOrderedAsync`, `ORDER BY id`) before either is read. This prevents the classic
+deadlock where Transfer A (wallet 1 → wallet 2) and Transfer B (wallet 2 → wallet 1)
+each hold one lock and wait on the other.
 
-The balance check (`from.Balance >= amount`) and the daily-limit check both happen
-*inside* the same locked transaction as the write, so there's no window for another
-request to slip in between "check" and "act".
+The balance check (`Wallet.Debit` throwing `InsufficientFundsException`) and the
+daily-limit check both happen *inside* the same locked transaction as the write, so
+there's no window for another request to slip in between "check" and "act".
 
 ### Idempotency
 
-`idempotency_records.key` has a unique constraint. A transfer request:
+`idempotency_records.key` has a unique database constraint. A transfer request:
 
-1. Looks up the key. If found and the stored request hash matches, replay the stored
-   response. If found with a different hash, `409` conflict.
-2. If not found, insert a `Processing` row for the key. If that insert fails on the
-   unique constraint (another request won the race), fall back to step 1's lookup.
-3. Perform the transfer, then update the same row to `Completed` with the serialized
-   response — all inside the transfer's own transaction, so a crash mid-transfer rolls
-   the idempotency record back too rather than leaving it stuck at `Processing` forever.
+1. Looks up the key. If found, `IdempotencyRecord.Resolve` decides: same hash and
+   completed → replay the stored response; same hash and still processing → 409
+   "in progress"; different hash → 409 conflict.
+2. If not found, attempts to insert a `Processing` row. `TryAddIdempotencyRecordAsync`
+   returns `false` if the insert loses a race on the unique constraint — **note that a
+   failed statement aborts the entire Postgres transaction**, so the code rolls back
+   immediately on `false` before doing anything else, then re-reads and resolves as in
+   step 1.
+3. Otherwise, performs the transfer and marks the record `Completed` with the
+   serialized response — all inside the transfer's own transaction, so a crash
+   mid-transfer rolls the idempotency record back too rather than leaving it stuck at
+   `Processing` forever.
 
 ### Daily limit
 
-₦500,000/day per wallet, computed as the sum of `TransferOut` transactions posted
-between the start and end of the *current day in WAT* (UTC+1, no DST — Nigeria doesn't
-observe daylight saving). That sum is computed inside the same locked transaction as
-the transfer it's checking, so it can't be bypassed by a race.
+₦500,000/day per wallet (`DailyTransferLimitPolicy`), computed against the start/end
+of the *current day in WAT* (`WatClock`, UTC+1, no DST). The sum of today's transfers
+is fetched inside the same locked transaction as the transfer it's checking, so it
+can't be bypassed by a race.
 
 ### Auth
 
 Endpoints require a JWT bearer token. `POST /api/auth/token` is a **mock issuer** — it
-signs a token for whatever `customerId` you send it, with no credential check at all.
-That's intentional per the brief ("a simplified/mock issuer is fine — the point is the
-middleware and claims handling"). The transfer endpoint additionally checks that the
-caller's `customerId` claim matches the source wallet's owner; `credit` does not enforce
-ownership, on the assumption it simulates a trusted inbound-NIP webhook rather than an
-end-user action — in production that would sit behind a service credential, not a
-customer JWT, entirely.
+signs a token for whatever `customerId` you send it, with no credential check at all,
+per the brief ("a simplified/mock issuer is fine"). The transfer endpoint additionally
+checks (`Wallet.EnsureOwnedBy`) that the caller's `customerId` claim matches the source
+wallet's owner; `credit` does not enforce ownership, on the assumption it simulates a
+trusted inbound-NIP webhook rather than an end-user action.
 
-### Errors
+### Errors: RFC 7807 via .NET 8's built-in pipeline
 
-All errors are RFC 7807 Problem Details (`application/problem+json`), mapped centrally
-in `ExceptionHandlingMiddleware` from a small set of domain exceptions
-(`WalletNotFoundException`, `InsufficientFundsException`, `DailyLimitExceededException`,
-`IdempotencyKeyConflictException`, etc.) to the right HTTP status.
+Errors are RFC 7807 Problem Details, produced by `DomainExceptionHandler`
+(`IExceptionHandler`) plus `builder.Services.AddProblemDetails()` — the framework's own
+.NET 8 extension point for this, rather than a hand-rolled try/catch middleware. This
+matters for two reasons: it composes with `[ApiController]`'s automatic
+`ValidationProblemDetails` for model-binding errors (so a malformed request body is
+*also* RFC 7807-shaped, not just our own thrown exceptions), and `CustomizeProblemDetails`
+lets us attach a trace id to every problem response from one place.
 
-Successful responses use a consistent `{ success, data, traceId }` envelope. Controller
-actions explicitly declare their request sources and OpenAPI response types; validation
-and domain failures are documented as Problem Details responses.
+Every action is annotated with `[ProducesResponseType]` for each status code it can
+actually return, so the generated OpenAPI spec documents the real contract (including
+error shapes) rather than just the happy path.
 
-### Tests
+**On a generic `ApiResponse<T>` success wrapper:** I deliberately did *not* add one
+(e.g. `{ success: true, data: {...} }`) around successful responses. Reasoning: the
+brief already asks for RFC 7807 on errors, and REST/ASP.NET Core convention is that
+success is conveyed by the HTTP status code and the resource is returned directly —
+wrapping successes but not errors means two different envelope shapes in the same API,
+and wrapping *everything* (including errors) would compete with Problem Details rather
+than complement it. It also costs real OpenAPI/Swagger ergonomics: every response type
+becomes `ApiResponse<WalletResponse>` instead of `WalletResponse`, and generated
+clients have to unwrap a layer for no informational gain. If your team has a standing
+convention that expects an envelope, it's a small, mechanical change from here.
 
-Tests are separated by layer:
+## Testing — one project per layer
 
-- `NovaWallet.Domain.Tests` tests wallet invariants without a database.
-- `NovaWallet.Application.Tests` tests application contracts.
-- `NovaWallet.Api.Tests` tests response and API metadata contracts.
-- `NovaWallet.Infrastructure.Tests` retains the Postgres/Testcontainers integration,
-  idempotency, and concurrency tests.
+```bash
+dotnet test
+```
+
+- **`NovaWallet.Domain.Tests`** — pure unit tests for `Wallet`, `IdempotencyRecord`,
+  `DailyTransferLimitPolicy`, `WatClock`. No mocks, no database, no async waiting;
+  these run in milliseconds and pin down the actual business rules.
+- **`NovaWallet.Application.Tests`** — tests `WalletService`'s orchestration against
+  `FakeWalletRepository`, a small in-memory stand-in for `IWalletRepository`. Deliberately
+  a *fake*, not a mock: these tests care about resulting state (balances, ledger rows)
+  after a use case runs, which a stateful fake represents more naturally than
+  interaction-verification would. No real locking is exercised here — there's nothing
+  concurrent in-process to lock against.
+- **`NovaWallet.Infrastructure.Tests`** — the same workflows, wired to the *real*
+  `EfWalletRepository` / `EfUnitOfWork` against a disposable Postgres container
+  ([Testcontainers](https://dotnet.testcontainers.org/)). This is where the
+  concurrency test lives, because concurrency safety is specifically a claim about
+  Postgres's row-locking behaviour — an in-memory or SQLite provider doesn't implement
+  real transactions/row locks the same way, so a concurrency test built on either would
+  pass even with the `FOR UPDATE` locking deleted. Requires Docker running locally.
+- **`NovaWallet.Api.Tests`** — `WebApplicationFactory<Program>` tests against the real
+  middleware pipeline (real JWT auth, real Problem Details mapping, real Swagger), with
+  `IWalletService` swapped for a controllable stub and the DbContext swapped for EF
+  Core's InMemory provider (purely so startup's `EnsureCreated()` succeeds — no test
+  here asserts anything about persistence). Answers "given the service returns X, does
+  the HTTP layer respond with the right status code and shape?" — a different question
+  from whether the business logic itself is correct.
 
 ## Trade-offs / things I'd do differently with more time
 
-- **EnsureCreated, not EF migrations.** For a 48–72 hour take-home I chose to have the
-  API create its schema on startup rather than commit migration files, so `docker
-  compose up` is guaranteed to work regardless of the machine it's run on. In a real
-  codebase this would be `dotnet ef migrations` from day one.
+- **EnsureCreated, not EF migrations.** The API creates its schema on startup rather
+  than shipping migration files, so `docker compose up` works regardless of the
+  machine it's run on. In a real codebase this would be `dotnet ef migrations` from
+  day one.
 - **Outbox pattern** (stretch goal) is not implemented — transfers don't publish a
-  `TransferCompleted` event. Given the time box I prioritized the hard constraints
-  (concurrency, idempotency, the daily limit, audit trail) over this.
+  `TransferCompleted` event.
 - **Rate limiting** is a simple fixed-window limiter (10 req/10s per customer) on the
   transfer endpoint — enough to demonstrate the middleware, not tuned for production
   traffic shapes.
 - **KYC tiers, BVN/NIN, USSD** are out of scope for this ledger microservice as
   specified — noted here only so it's clear they weren't missed by oversight.
 - **Single currency (NGN)** — the `Currency` column exists on `Wallet` but nothing
-  enforces or converts between currencies; multi-currency wallets would need that
-  addressed explicitly.
+  enforces or converts between currencies.
 
 ## Assumptions
 
 - "Concurrency-safe" is interpreted per the brief as: correct under concurrent requests
-  to a single instance sharing one Postgres database (the `docker compose` topology).
-  Row-level locking gives this correctly across multiple API instances too, since the
-  lock lives in Postgres, not in process memory.
+  sharing one Postgres database (the `docker compose` topology). Row-level locking
+  gives this correctly across multiple API instances too, since the lock lives in
+  Postgres, not in process memory.
 - The daily limit resets at midnight **WAT**, not UTC, per the brief's operating context.
 - `Idempotency-Key` is required on transfer and rejected with `400` if absent, rather
   than silently proceeding without idempotency protection.

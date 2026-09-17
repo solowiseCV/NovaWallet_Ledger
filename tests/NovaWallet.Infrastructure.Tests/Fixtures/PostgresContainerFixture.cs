@@ -4,11 +4,10 @@ using Xunit;
 namespace NovaWallet.Infrastructure.Tests.Fixtures;
 
 /// <summary>
-/// Spins up a real PostgreSQL container for the test run so integration tests
-/// exercise the actual "SELECT ... FOR UPDATE" row-locking behaviour the
-/// WalletService relies on. An in-memory or SQLite provider would NOT catch
-/// concurrency bugs here, since neither implements real row-level locking
-/// the same way — see AI_USAGE.md.
+/// Spins up a real PostgreSQL container so these tests exercise the actual
+/// "SELECT ... FOR UPDATE" row-locking behaviour EfWalletRepository relies on.
+/// An in-memory or SQLite provider would NOT catch concurrency bugs here, since
+/// neither implements real row-level locking the same way — see AI_USAGE.md.
 /// </summary>
 public class PostgresContainerFixture : IAsyncLifetime
 {
